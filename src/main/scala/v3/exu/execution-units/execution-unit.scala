@@ -102,6 +102,7 @@ abstract class ExecutionUnit(
 {
 
   val io = IO(new Bundle {
+    val fase_idle = Output(Bool())
     val fu_types = Output(Bits(FUC_SZ.W))
 
     val req      = Flipped(new DecoupledIO(new FuncUnitReq(dataWidth)))
@@ -250,6 +251,7 @@ class ALUExeUnit(
 
   override def toString: String = out_str.toString
 
+  val mem_fase_idle = WireInit(true.B)
   val div_busy  = WireInit(false.B)
   val ifpu_busy = WireInit(false.B)
 
@@ -386,6 +388,7 @@ class ALUExeUnit(
   if (hasMem) {
     require(!hasAlu)
     val maddrcalc = Module(new MemAddrCalcUnit)
+    mem_fase_idle := maddrcalc.io.fase_idle
     maddrcalc.io.req        <> io.req
     maddrcalc.io.req.valid  := io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
     maddrcalc.io.brupdate     <> io.brupdate
@@ -421,6 +424,9 @@ class ALUExeUnit(
       io.iresp.bits.uop.ctrl.csr_cmd := alu.io.resp.bits.uop.ctrl.csr_cmd
     }
   }
+
+  io.fase_idle := !io.req.valid && !div_busy && !ifpu_busy && mem_fase_idle &&
+    iresp_fu_units.map(_.io.fase_idle).foldLeft(true.B)(_ && _)
 
   assert ((PopCount(iresp_fu_units.map(_.io.resp.valid)) <= 1.U && !div_resp_val) ||
           (PopCount(iresp_fu_units.map(_.io.resp.valid)) <= 2.U && (div_resp_val)),
@@ -569,4 +575,7 @@ class FPUExeUnit(
   }
 
   override def toString: String = out_str.toString
+  io.fase_idle := !io.req.valid && !fdiv_busy && !fpiu_busy &&
+    fu_units.map(_.io.fase_idle).foldLeft(true.B)(_ && _)
+
 }

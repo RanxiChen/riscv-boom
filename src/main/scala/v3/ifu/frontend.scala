@@ -240,7 +240,7 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val end_half      = Valid(UInt(16.W))
 
 
-  val bpd_meta      = Vec(nBanks, UInt())
+  val bpd_meta      = Vec(nBanks, UInt(bpdMaxMetaLength.W))
 
   // Source of the prediction from this bundle
   val fsrc    = UInt(BSRC_SZ.W)
@@ -255,6 +255,10 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
  */
 class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
 {
+  val fase_park = Output(Bool())
+  val fase_clear = Output(Bool())
+  val fase_inject = Decoupled(UInt(32.W))
+  val fase_resume = Valid(UInt(vaddrBitsExtended.W))
   // Give the backend a packet of instructions.
   val fetchpacket       = Flipped(new DecoupledIO(new FetchBufferResp))
 
@@ -859,7 +863,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     Module(new Queue(new FetchBundle, 1, pipe=true, flow=false))}
 
   val fb  = Module(new FetchBuffer)
-  val ftq = Module(new FetchTargetQueue)
+  val ftq = withReset(reset.asBool || io.cpu.fase_clear) { Module(new FetchTargetQueue) }
 
   // When we mispredict, we need to repair
 
@@ -922,6 +926,28 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   ftq.io.enq.valid          := f4.io.deq.valid && fb.io.enq.ready && !f4_delay
   ftq.io.enq.bits           := f4.io.deq.bits
 
+  io.cpu.fase_inject.ready := io.cpu.fase_park && !io.cpu.fase_clear &&
+    fb.io.enq.ready && ftq.io.enq.ready && !io.cpu.redirect_flush
+  when (io.cpu.fase_park) {
+    val injected = Wire(new FetchBundle)
+    injected := 0.U.asTypeOf(new FetchBundle)
+    // Known, aligned, ROM-resident provenance PC. The injected instruction is
+    // synthetic; PC-relative jumps/branches are outside the original port contract.
+    injected.pc := "h10000".U
+    injected.next_pc := "h10004".U
+    injected.mask := 1.U
+    injected.insts(0) := io.cpu.fase_inject.bits
+    injected.exp_insts(0) := io.cpu.fase_inject.bits
+    f4.io.deq.ready := false.B
+    fb.io.enq.valid := io.cpu.fase_inject.valid && ftq.io.enq.ready &&
+      !io.cpu.fase_clear && !io.cpu.redirect_flush
+    fb.io.enq.bits := injected
+    fb.io.enq.bits.ftq_idx := ftq.io.enq_idx
+    ftq.io.enq.valid := io.cpu.fase_inject.valid && fb.io.enq.ready &&
+      !io.cpu.fase_clear && !io.cpu.redirect_flush
+    ftq.io.enq.bits := injected
+  }
+
   val bpd_update_arbiter = Module(new Arbiter(new BranchPredictionUpdate, 2))
   bpd_update_arbiter.io.in(0).valid := ftq.io.bpdupdate.valid
   bpd_update_arbiter.io.in(0).bits  := ftq.io.bpdupdate.bits
@@ -979,6 +1005,24 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
     ftq.io.redirect.valid := io.cpu.redirect_val
     ftq.io.redirect.bits  := io.cpu.redirect_ftq_idx
+  }
+
+  // Stop normal I-cache traffic while the FASE owner holds the core. SFENCE
+  // still passes through its normal TLB invalidation path above.
+  when (io.cpu.fase_park) {
+    s0_valid := false.B
+    f4_clear := true.B
+    f3_clear := true.B
+    f2_clear := true.B
+    f1_clear := true.B
+  }
+  when (io.cpu.fase_clear) { fb.io.clear := true.B }
+  when (io.cpu.fase_resume.valid) {
+    s0_valid := true.B
+    s0_vpc := io.cpu.fase_resume.bits
+    s0_ghist := 0.U.asTypeOf(new GlobalHistory)
+    s0_tsrc := BSRC_C
+    s0_is_replay := false.B
   }
 
   ftq.io.debug_ftq_idx := io.cpu.debug_ftq_idx

@@ -84,12 +84,18 @@ abstract class AbstractRenameStage(
     val rbk_valids = Input(Vec(plWidth, Bool()))
     val rollback = Input(Bool())
 
+    val fase_idx = Input(UInt(5.W))
+    val fase_write = Input(Bool())
+    val fase_preg = Output(UInt(log2Ceil(numPhysRegs).W))
+    val fase_can_write = Output(Bool())
     val debug_rob_empty = Input(Bool())
     val debug = Output(new DebugRenameStageIO(numPhysRegs))
   })
 
   io.ren_stalls.foreach(_ := false.B)
   io.debug := DontCare
+  io.fase_preg := 0.U
+  io.fase_can_write := false.B
 
   def BypassAllocations(uop: MicroOp, older_uops: Seq[MicroOp], alloc_reqs: Seq[Bool]): MicroOp
 
@@ -265,7 +271,14 @@ class RenameStage(
   ren2_alloc_reqs zip rbk_valids.reverse zip remap_reqs map {
     case ((a,r),rr) => rr.valid := a || r}
 
+  // Only used at a proven drained boundary. Normal rename remains unchanged.
+  if (!float && p(BoomFaseKey)) {
+    map_reqs(0).lrs3 := DontCare
+    // A dedicated map-table query avoids disturbing any normal decode operand.
+  }
+
   // Hook up inputs.
+  maptable.io.fase_idx := io.fase_idx
   maptable.io.map_reqs    := map_reqs
   maptable.io.remap_reqs  := remap_reqs
   maptable.io.ren_br_tags := ren2_br_tags
@@ -300,6 +313,27 @@ class RenameStage(
   assert (ren2_alloc_reqs zip freelist.io.alloc_pregs map {case (r,p) => !r || p.bits =/= 0.U} reduce (_&&_),
            "[rename-stage] A uop is trying to allocate the zero physical register.")
 
+  if (!float && p(BoomFaseKey)) {
+    val mapped = maptable.io.fase_preg
+    val allocated = freelist.io.alloc_pregs(0)
+    val needsAllocation = io.fase_idx =/= 0.U && mapped === 0.U
+    val target = Mux(needsAllocation, allocated.bits, mapped)
+    io.fase_preg := target
+    io.fase_can_write := !needsAllocation || allocated.valid
+    when (io.fase_write && io.fase_idx =/= 0.U) {
+      assert(io.debug_rob_empty && !io.ren2_mask.asUInt.orR && !io.rollback)
+      assert(io.fase_can_write && target =/= 0.U)
+      when (needsAllocation) {
+        freelist.io.reqs(0) := true.B
+        maptable.io.remap_reqs(0).valid := true.B
+        maptable.io.remap_reqs(0).ldst := io.fase_idx
+        maptable.io.remap_reqs(0).pdst := target
+      }
+    }
+    // Return p0 for a read of an as-yet unassigned architectural register.
+    when (!io.fase_write) { io.fase_preg := mapped }
+  }
+
   // Freelist outputs.
   for ((uop, w) <- ren2_uops.zipWithIndex) {
     val preg = freelist.io.alloc_pregs(w).bits
@@ -313,6 +347,12 @@ class RenameStage(
   busytable.io.rebusy_reqs := ren2_alloc_reqs
   busytable.io.wb_valids := io.wakeups.map(_.valid)
   busytable.io.wb_pdsts := io.wakeups.map(_.bits.uop.pdst)
+  if (!float && p(BoomFaseKey)) {
+    when (io.fase_write && io.fase_idx =/= 0.U) {
+      busytable.io.wb_valids(0) := true.B
+      busytable.io.wb_pdsts(0) := io.fase_preg
+    }
+  }
 
   assert (!(io.wakeups.map(x => x.valid && x.bits.uop.dst_rtype =/= rtype).reduce(_||_)),
    "[rename] Wakeup has wrong rtype.")

@@ -51,6 +51,7 @@ class FpPipeline(implicit p: Parameters) extends BoomModule with tile.HasFPUPara
     val wb_valids        = Input(Vec(numWakeupPorts, Bool()))
     val wb_pdsts         = Input(Vec(numWakeupPorts, UInt(width=fpPregSz.W)))
 
+    val fase_idle = Output(Bool())
     val debug_tsc_reg    = Input(UInt(width=xLen.W))
     val debug_wb_wdata   = Output(Vec(numWakeupPorts, UInt((fLen+1).W)))
   })
@@ -78,6 +79,9 @@ class FpPipeline(implicit p: Parameters) extends BoomModule with tile.HasFPUPara
                          0, // No bypass for FP
                          0,
                          fLen+1))
+
+  io.fase_idle := issue_unit.io.event_empty && fregister_read.io.fase_idle &&
+    exe_units.map(_.io.fase_idle).foldLeft(true.B)(_ && _)
 
   require (exe_units.count(_.readsFrf) == issue_unit.issueWidth)
   require (exe_units.numFrfWritePorts + numLlPorts == numWakeupPorts)

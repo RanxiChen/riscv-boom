@@ -82,6 +82,7 @@ class BoomTile private(
   def this(params: BoomTileParams, crossing: HierarchicalElementCrossingParamsLike, lookup: LookupByHartIdImpl)(implicit p: Parameters) =
     this(params, crossing.crossingType, lookup, p)
 
+  val faseUartNode = if (p(BoomFaseKey)) Some(BundleBridgeSource(() => new FaseUartPort)) else None
   val intOutwardNode = None
   val masterNode = TLIdentityNode()
   val slaveNode = TLIdentityNode()
@@ -158,6 +159,14 @@ class BoomTileModuleImp(outer: BoomTile) extends BaseTileModuleImp(outer){
 
   val core = Module(new BoomCore()(outer.p))
   val lsu  = Module(new LSU()(outer.p, outer.dcache.module.edge))
+  if (outer.p(BoomFaseKey)) {
+    val fase = Module(new nulctrl.NulCPUCtrlMPWithUart(1, 50000000, 460800, outer.p(BoomFaseMicrocodeKey)))
+    core.io.fase.get <> fase.io.cpu(0)
+    val uart = outer.faseUartNode.get.bundle
+    fase.io.rxd := uart.rxd.asUInt
+    uart.txd := fase.io.txd.asBool
+    uart.state := fase.io.dbg_sta
+  }
 
   val ptwPorts         = ListBuffer(lsu.io.ptw, outer.frontend.module.io.ptw, core.io.ptw_tlb)
 

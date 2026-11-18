@@ -166,6 +166,7 @@ abstract class FunctionalUnit(
   (implicit p: Parameters) extends BoomModule
 {
   val io = IO(new Bundle {
+    val fase_idle = Output(Bool())
     val req    = Flipped(new DecoupledIO(new FuncUnitReq(dataWidth)))
     val resp   = (new DecoupledIO(new FuncUnitResp(dataWidth)))
 
@@ -187,6 +188,8 @@ abstract class FunctionalUnit(
     val scontext = if (isMemAddrCalcUnit) Input(UInt(coreParams.scontextWidth.W)) else null
 
   })
+
+  io.fase_idle := !io.req.valid && io.req.ready && !io.resp.valid
 
   io.bypass.foreach { b => b.valid := false.B; b.bits := DontCare }
 
@@ -235,6 +238,7 @@ abstract class PipelinedFunctionalUnit(
   if (numStages > 0) {
     val r_valids = RegInit(VecInit(Seq.fill(numStages) { false.B }))
     val r_uops   = Reg(Vec(numStages, new MicroOp()))
+    io.fase_idle := !io.req.valid && !r_valids.asUInt.orR
 
     // handle incoming request
     r_valids(0) := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop) && !io.req.bits.kill

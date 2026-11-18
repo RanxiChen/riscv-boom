@@ -130,6 +130,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val clr_unsafe      = Output(Vec(memWidth, Valid(UInt(robAddrSz.W))))
 
   // Tell the DCache to clear prefetches/speculating misses
+  val fase_idle = Output(Bool())
   val fence_dmem   = Input(Bool())
 
   // Speculatively tell the IQs that we'll get load data back next cycle
@@ -345,6 +346,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   io.dmem.force_order   := io.core.fence_dmem
   io.core.fencei_rdy    := !stq_nonempty && io.dmem.ordered
+  io.core.fase_idle := !stq_nonempty && !ldq.map(_.valid).reduce(_ || _) && io.dmem.ordered
 
 
   //-------------------------------------------------------------

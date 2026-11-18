@@ -59,6 +59,7 @@ class RegisterRead(
     // send micro-ops to the execution pipelines
     val exe_reqs = Vec(issueWidth, (new DecoupledIO(new FuncUnitReq(registerWidth))))
 
+    val fase_idle = Output(Bool())
     val kill   = Input(Bool())
     val brupdate = Input(new BrUpdateInfo())
   })
@@ -72,6 +73,7 @@ class RegisterRead(
   val exe_reg_rs2_data = Reg(Vec(issueWidth, Bits(registerWidth.W)))
   val exe_reg_rs3_data = Reg(Vec(issueWidth, Bits(registerWidth.W)))
   val exe_reg_pred_data = Reg(Vec(issueWidth, Bool()))
+  io.fase_idle := !io.iss_valids.asUInt.orR && !rrd_valids.asUInt.orR && !exe_reg_valids.asUInt.orR
 
   //-------------------------------------------------------------
   // hook up inputs

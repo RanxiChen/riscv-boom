@@ -52,6 +52,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   with HasBoomFrontendParameters // TODO: Don't add this trait
 {
   val io = IO(new Bundle {
+    val fase = if (p(BoomFaseKey)) Some(Flipped(new nulctrl.NulCPUBundle)) else None
     val hartid = Input(UInt(hartIdLen.W))
     val interrupts = Input(new freechips.rocketchip.rocket.CoreInterrupts(false))
     val ifu = new boom.v3.ifu.BoomFrontendIO
@@ -63,6 +64,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     val fcsr_rm = UInt(freechips.rocketchip.tile.FPConstants.RM_SZ.W)
   })
 
+  val faseBlockDecode = WireInit(false.B)
+  val faseParkFrontend = WireInit(false.B)
+  val faseInjectDecode = WireInit(false.B)
+  val faseLegalPark = WireInit(false.B)
+  val faseForceInterrupt = WireInit(false.B)
+  val faseClear = WireInit(false.B)
   io.ptw_tlb := DontCare
   io.ptw := DontCare
   io.ifu := DontCare
@@ -378,6 +385,14 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.redirect_val         := false.B
   io.ifu.redirect_flush       := false.B
 
+  io.ifu.fase_park := faseParkFrontend
+  io.ifu.fase_clear := faseClear
+  io.ifu.fase_inject.valid := false.B
+  io.ifu.fase_inject.bits := 0.U
+  io.ifu.fase_resume.valid := false.B
+  io.ifu.fase_resume.bits := 0.U
+  rename_stages.foreach { s => s.io.fase_idx := 0.U; s.io.fase_write := false.B }
+
   // Breakpoint info
   io.ifu.status  := csr.io.status
   io.ifu.bp      := csr.io.bp
@@ -498,7 +513,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   //-------------------------------------------------------------
   // Pull out instructions and send to the Decoders
 
-  io.ifu.fetchpacket.ready := dec_ready
+  io.ifu.fetchpacket.ready := dec_ready && (!faseBlockDecode || faseInjectDecode)
   val dec_fbundle = io.ifu.fetchpacket.bits
 
   //-------------------------------------------------------------
@@ -506,7 +521,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
   for (w <- 0 until coreWidth) {
     dec_valids(w)                      := io.ifu.fetchpacket.valid && dec_fbundle.uops(w).valid &&
-                                          !dec_finished_mask(w)
+                                          !dec_finished_mask(w) && (!faseBlockDecode || faseInjectDecode)
     decode_units(w).io.enq.uop         := dec_fbundle.uops(w).bits
     decode_units(w).io.status          := csr.io.status
     decode_units(w).io.csr_decode      <> csr.io.decode(w)
@@ -708,7 +723,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
                       || io.ifu.redirect_flush))
 
 
-  io.lsu.fence_dmem := (dis_valids zip wait_for_empty_pipeline).map {case (v,w) => v && w} .reduce(_||_)
+  io.lsu.fence_dmem := faseParkFrontend || (dis_valids zip wait_for_empty_pipeline).map {case (v,w) => v && w} .reduce(_||_)
 
   val dis_stalls = dis_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
   dis_fire := dis_valids zip dis_stalls map {case (v,s) => v && !s}
@@ -1065,6 +1080,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
   csr.io.hartid := io.hartid
   csr.io.interrupts := io.interrupts
+  csr.io.interrupts.meip := io.interrupts.meip || faseForceInterrupt
 
   // we do not support the H-extension
   csr.io.htval := DontCare
@@ -1319,12 +1335,153 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   //-------------------------------------------------------------
   //-------------------------------------------------------------
 
+
+  if (p(BoomFaseKey)) {
+    require(coreWidth == 1 && !enableSFBOpt && !usingRoCC && !tileParams.dcache.get.clockGate,
+      "FASE requires single-wide Small BOOM, no RoCC/SFB, and an ungated DCache")
+    // PTW clock_enabled is also its existing activity feedback. With DCache
+    // gating disabled, chickenCSR bit 0 is read-only zero. Drive actual CSR
+    // values rather than the old unused/DontCare PTW custom-CSR outputs.
+    (io.ptw.customCSRs.csrs zip custom_csrs.csrs).foreach { case (dst, src) =>
+      dst.value := src.value
+      dst.ren := src.ren
+      dst.wen := src.wen
+      dst.wdata := src.wdata
+    }
+    // BOOM does not use this third TLB requestor; make its inactivity explicit.
+    io.ptw_tlb.req.valid := false.B
+    io.ptw_tlb.req.bits.valid := false.B
+    val f = io.fase.get
+    val sRun :: sDrain :: sClear :: sPark :: sRead :: sReply :: sInject :: sResume :: sFault :: Nil = Enum(9)
+    val phase = RegInit(sRun)
+    val bootDone = RegInit(false.B)
+    val inited = RegInit(false.B)
+    val forced = RegInit(false.B)
+    val retired = RegInit(false.B)
+    val isMret = RegInit(false.B)
+    val resumeAfterClear = RegInit(false.B)
+    val resumePC = Reg(UInt(vaddrBitsExtended.W))
+    val readZero = Reg(Bool())
+    val readData = Reg(UInt(64.W))
+    // Boot marker is retired, never merely fetched/decoded.
+    val bootMarker = !bootDone && rob.io.commit.arch_valids(0) &&
+      rob.io.commit.uops(0).inst === "h34001073".U
+    val requestStop = bootDone && f.stop_fetch && csr.io.status.prv === 3.U
+    val owns = phase =/= sRun || requestStop || bootMarker
+    faseBlockDecode := owns
+    faseParkFrontend := owns
+    faseInjectDecode := phase === sInject
+    faseClear := phase === sClear
+    faseLegalPark := phase === sPark || phase === sRead || phase === sReply || phase === sFault
+    when (faseClear) { dec_finished_mask := 0.U }
+
+    when (f.ext_itr && csr.io.status.prv =/= 3.U) { forced := true.B }
+    when (csr.io.status.prv === 3.U) { forced := false.B }
+    faseForceInterrupt := forced
+    f.priv := csr.io.status.prv
+    f.inited := inited
+    f.regacc_rdata := readData
+    f.regacc_busy := phase =/= sReply || csr.io.status.debug
+    f.inst64_ready := phase === sPark && !csr.io.status.debug &&
+      !f.regacc_rd && !f.regacc_wt && io.ifu.fase_inject.ready
+    f.inst64_busy := phase =/= sPark || csr.io.status.debug
+    io.ifu.fase_inject.valid := phase === sPark && f.inst64 &&
+      !csr.io.status.debug && !f.regacc_rd && !f.regacc_wt
+    io.ifu.fase_inject.bits := f.inst64_raw
+
+    // True hardware occupancy, not an arbitrary post-stop delay. Three history
+    // stages only cover the existing fixed CSR/ROB redirect register pipeline.
+    val transient = rob.io.flush.valid || rob.io.com_xcpt.valid || io.ifu.redirect_flush ||
+      brupdate.b1.mispredict_mask.orR || brupdate.b2.mispredict
+    val redirectHistory = RegNext(transient, true.B) ||
+      RegNext(RegNext(transient, true.B), true.B) ||
+      RegNext(RegNext(RegNext(transient, true.B), true.B), true.B)
+    val quiet = rob.io.empty && rob.io.ready &&
+      !rename_stages.map(_.io.ren2_mask.asUInt.orR).reduce(_ || _) &&
+      issue_units.map(_.io.event_empty).reduce(_ && _) &&
+      iregister_read.io.fase_idle && exe_units.map(_.io.fase_idle).reduce(_ && _) &&
+      (if (usingFPU) fp_pipeline.io.fase_idle else true.B) && io.lsu.fase_idle && !io.ptw.clock_enabled &&
+      !transient && !redirectHistory && !csr.io.status.debug && !csr.io.csr_stall
+
+    rename_stage.io.fase_idx := f.regacc_idx
+    val writeReg = phase === sPark && f.regacc_wt && !f.regacc_rd &&
+      !csr.io.status.debug && rename_stage.io.fase_can_write
+    rename_stage.io.fase_write := writeReg
+    when (phase === sPark || phase === sRead) {
+      iregfile.io.read_ports(0).addr := rename_stage.io.fase_preg
+    }
+    when (writeReg && f.regacc_idx =/= 0.U) {
+      assert(quiet, "FASE direct write before the backend drained")
+      assert(!iregfile.io.write_ports.drop(1).map(_.valid).reduce(_ || _))
+      iregfile.io.write_ports(0).valid := true.B
+      iregfile.io.write_ports(0).bits.addr := rename_stage.io.fase_preg
+      iregfile.io.write_ports(0).bits.data := f.regacc_wdata
+    }
+
+    when (bootMarker) { bootDone := true.B }
+    switch (phase) {
+      is (sRun) {
+        when (requestStop || bootMarker) { phase := sDrain }
+      }
+      is (sDrain) {
+        when (quiet) { resumeAfterClear := false.B; phase := sClear }
+      }
+      is (sClear) {
+        assert(quiet, "FASE cleared frontend with backend references still live")
+        phase := Mux(resumeAfterClear, sResume, sPark)
+        inited := true.B
+      }
+      is (sPark) {
+        assert(quiet, "FASE parked core still has backend activity")
+        when (f.regacc_rd && !csr.io.status.debug) {
+          readZero := f.regacc_idx === 0.U || rename_stage.io.fase_preg === 0.U
+          phase := sRead
+        } .elsewhen (writeReg) {
+          phase := sReply
+        } .elsewhen (f.inst64 && f.inst64_ready) {
+          retired := false.B
+          isMret := f.inst64_raw === "h30200073".U
+          phase := sInject
+        }
+      }
+      is (sRead) {
+        readData := Mux(readZero, 0.U, iregfile.io.read_ports(0).data)
+        phase := sReply
+      }
+      is (sReply) { when (!csr.io.status.debug) { phase := sPark } }
+      is (sInject) {
+        when (rob.io.commit.arch_valids.asUInt.orR) { retired := true.B }
+        when (io.ifu.redirect_val) { resumePC := io.ifu.redirect_pc }
+        // ECALL/EBREAK use CSRFile's special system-trap retirement path,
+        // rather than the ROB's ordinary com_xcpt notification.
+        when (rob.io.com_xcpt.valid ||
+          (rob.io.commit.arch_valids(0) && rob.io.commit.uops(0).is_sys_pc2epc)) {
+          phase := sFault
+        }
+        when (retired && quiet) {
+          resumeAfterClear := isMret
+          phase := sClear
+        }
+      }
+      is (sResume) {
+        assert(csr.io.status.prv === 0.U, "FASE MRET did not return to U mode")
+        io.ifu.fase_resume.valid := true.B
+        io.ifu.fase_resume.bits := resumePC
+        phase := sRun
+      }
+    }
+    // An unexpected injected exception is fail-closed. Never report it completed.
+    dontTouch(phase)
+    dontTouch(forced)
+    dontTouch(resumePC)
+  }
+
   // detect pipeline freezes and throw error
   val idle_cycles = freechips.rocketchip.util.WideCounter(32)
   when (rob.io.commit.valids.asUInt.orR ||
         csr.io.csr_stall ||
         io.rocc.busy ||
-        reset.asBool) {
+        reset.asBool || faseLegalPark) {
     idle_cycles := 0.U
   }
   assert (!(idle_cycles.value(13)), "Pipeline has hung.")

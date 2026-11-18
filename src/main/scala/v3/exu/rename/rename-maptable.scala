@@ -52,6 +52,8 @@ class RenameMapTable(
 
   val io = IO(new BoomBundle()(p) {
     // Logical sources -> physical sources.
+    val fase_idx = Input(UInt(5.W))
+    val fase_preg = Output(UInt(pregSz.W))
     val map_reqs    = Input(Vec(plWidth, new MapReq(lregSz)))
     val map_resps   = Output(Vec(plWidth, new MapResp(pregSz)))
 
@@ -69,6 +71,7 @@ class RenameMapTable(
   // The map table register array and its branch snapshots.
   val map_table = RegInit(VecInit(Seq.fill(numLregs){0.U(pregSz.W)}))
   val br_snapshots = Reg(Vec(maxBrCount, Vec(numLregs, UInt(pregSz.W))))
+  io.fase_preg := map_table(io.fase_idx)
 
   // The intermediate states of the map table following modification by each pipeline slot.
   val remap_table = Wire(Vec(plWidth+1, Vec(numLregs, UInt(pregSz.W))))

@@ -182,6 +182,7 @@ class FDivSqrtUnit(implicit p: Parameters)
   // buffer output and down-convert as needed
 
   val r_out_val = RegInit(false.B)
+  io.fase_idle := !io.req.valid && !r_buffer_val && !r_divsqrt_val && !r_out_val
   val r_out_uop = Reg(new MicroOp)
   val r_out_flags_double = Reg(Bits())
   val r_out_wdata_double = Reg(Bits())
