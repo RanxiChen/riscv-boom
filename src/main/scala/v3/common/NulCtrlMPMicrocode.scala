@@ -3,16 +3,16 @@ package nulctrl
 import chisel3._
 import chisel3.util._
 
-// Based on the FASE v4 control-ROM implementation at e6a3e5a.
+// Based on the FASE control-ROM implementation at e6a3e5a.
 // The BOOM variant shares the page SRAM ports and prefetches write data.
-private object V4_CPU_State {
+private object MicrocodeCpuState {
   val CPU_INIT = 0.U
   val CPU_HALT = 1.U
   val CPU_ITR  = 2.U
   val CPU_USER = 3.U
 }
 
-private object V4_SER_OP {
+private object MicrocodeSerialOp {
   val SEROP_NEXT  = 0.U   //  OP[8]                               -> ACK[8] ID[8] CAUSE[8] PC[48] (ARG[48])
   val SEROP_HALT  = 1.U   //  OP[8]       ID[8]                  -> ACK[8]
   val SEROP_ITR   = 2.U   //  OP[8]       ID[8]                  -> ACK[8]
@@ -37,7 +37,7 @@ private object V4_SER_OP {
   val SEROP_INST  = 30.U
 }
 
-private object V4_Ctrl_State {
+private object MicrocodeControllerState {
   val STATE_INIT_WAIT = 0.U
   val STATE_RECV_HEAD = 1.U
   val STATE_RECV_ARG = 2.U
@@ -51,7 +51,7 @@ private object V4_Ctrl_State {
   val STATE_DUMP_DATA = 10.U
   val STATE_ERROR = 11.U
 }
-private object V4_OP_OP {
+private object MicrocodeRoutine {
   val STATE_DO_INIT       = 0.U
   val STATE_NEXT          = 2.U
   val STATE_MMU           = 3.U
@@ -119,11 +119,11 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   val last_priv = RegInit(VecInit(Seq.fill(cpunum)(3.U(2.W))))
   for (i <- 0 until cpunum) {
     last_priv(i) := io.cpu(i).priv
-    when((last_priv(i) === 0.U) && (io.cpu(i).priv =/= 0.U) && (cpu_state(i) === V4_CPU_State.CPU_USER)) {
+    when((last_priv(i) === 0.U) && (io.cpu(i).priv =/= 0.U) && (cpu_state(i) === MicrocodeCpuState.CPU_USER)) {
       cpu_raised_itr(i) := true.B
-      cpu_state(i) := V4_CPU_State.CPU_ITR
+      cpu_state(i) := MicrocodeCpuState.CPU_ITR
     }
-    io.cpu(i).stop_fetch := (cpu_state(i) === V4_CPU_State.CPU_ITR) || (cpu_state(i) === V4_CPU_State.CPU_HALT) || (last_priv(i) === 0.U && io.cpu(i).priv =/= 0.U)
+    io.cpu(i).stop_fetch := (cpu_state(i) === MicrocodeCpuState.CPU_ITR) || (cpu_state(i) === MicrocodeCpuState.CPU_HALT) || (last_priv(i) === 0.U && io.cpu(i).priv =/= 0.U)
   }
   val event_queue = Module(new Queue(UInt(cpunum_bitwid.W), cpunum + 1))
   val has_itr = cpu_raised_itr.reduce(_ || _)
@@ -134,7 +134,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     cpu_raised_itr(event_idx) := false.B
   }
   /**
-   * V4_Ctrl_State
+   * MicrocodeControllerState
    */
   val state = RegInit(0.U(5.W))
   val trans_bytes = RegInit(0.U(5.W))
@@ -145,7 +145,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   val state_register = RegInit(0.U(5.W))
   val errno = RegInit(0.U(6.W))
   val initialized = RegInit(false.B)
-  val errored = (state === V4_Ctrl_State.STATE_ERROR)
+  val errored = (state === MicrocodeControllerState.STATE_ERROR)
   io.dbg_sta := Cat(initialized, errored, errno(5, 0))
   val opcode = RegInit(0.U(5.W))
   val opoff = RegInit(0.U(3.W))
@@ -155,7 +155,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
 
   val ctrl_rom = SyncReadMem(rom_size, UInt(39.W))
   private val romFile = new java.io.File(
-    "generators/riscv-boom/src/main/resources/fase_ctrl_v4.hex").getCanonicalPath
+    "generators/riscv-boom/src/main/resources/fase_ctrl_microcode.hex").getCanonicalPath
   chisel3.util.experimental.loadMemoryFromFileInline(ctrl_rom, romFile)
 
   val ctrl_ptr = WireDefault(0.U(rom_addr_wid.W))
@@ -189,7 +189,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   val hfutex_set_value = Cat(oparg(7), oparg(6), oparg(5), oparg(4), oparg(3), oparg(2))
   val hfutex_hit = hfutex_masks(opidx).map(_ === hfutex_match_reg).reduce(_ || _)
   val hfutex_hit_set = hfutex_masks(opidx).map(_ === hfutex_set_value).reduce(_ || _)
-  val all_halted = cpu_state.forall(_ === V4_CPU_State.CPU_HALT)
+  val all_halted = cpu_state.forall(_ === MicrocodeCpuState.CPU_HALT)
   val regback = RegInit(VecInit(Seq.fill(10)(0.U(64.W))))
   val pg_base_addr2 = Cat((0.U(12.W)), oparg(6), oparg(5), oparg(4), oparg(3), oparg(2), (0.U(12.W)))
 
@@ -214,42 +214,42 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   val pageReadData = page_mem.read(pageReadAddress, pageReadEnable)
   val capturePageWord = WireDefault(false.B)
 
-  event_queue.io.deq.ready := (state === V4_Ctrl_State.STATE_WAIT_NEXT)
-  when(state === V4_Ctrl_State.STATE_WAIT_NEXT && event_queue.io.deq.valid) {
+  event_queue.io.deq.ready := (state === MicrocodeControllerState.STATE_WAIT_NEXT)
+  when(state === MicrocodeControllerState.STATE_WAIT_NEXT && event_queue.io.deq.valid) {
     val pending_next_idx = event_queue.io.deq.bits.pad(8)
     oparg(1) := pending_next_idx // to update sel_cpu port
     retarg(0) := pending_next_idx
-    state_register := V4_OP_OP.STATE_NEXT
-    state := V4_Ctrl_State.STATE_RUN
+    state_register := MicrocodeRoutine.STATE_NEXT
+    state := MicrocodeControllerState.STATE_RUN
     cnt_run := 0.U
     ctrl_base_addr := 8.U
     ctrl_ptr := 8.U
-  }.elsewhen(state === V4_Ctrl_State.STATE_WAIT_NEXT && all_halted) {
+  }.elsewhen(state === MicrocodeControllerState.STATE_WAIT_NEXT && all_halted) {
     retarg(0) := "hff".U
-    state := V4_Ctrl_State.STATE_SEND_HEAD
+    state := MicrocodeControllerState.STATE_SEND_HEAD
   }
   //state machine, two-process FSM
   //next-state and sequential logic
   //begin from wait_init
-  when(state === V4_Ctrl_State.STATE_INIT_WAIT){
+  when(state === MicrocodeControllerState.STATE_INIT_WAIT){
     when(all_inited){
       when(inited_num < cpunum.U){
-        state_register := V4_OP_OP.STATE_DO_INIT
+        state_register := MicrocodeRoutine.STATE_DO_INIT
         oparg(1) := inited_num(cpunum_bitwid - 1, 0) // when cpunum < 255, it must works
-        state := V4_Ctrl_State.STATE_RUN
+        state := MicrocodeControllerState.STATE_RUN
         cnt_run := 0.U
         for(index <- 0 until cpunum){
-          cpu_state(index) := V4_CPU_State.CPU_HALT
+          cpu_state(index) := MicrocodeCpuState.CPU_HALT
         }
       }.elsewhen(inited_num === cpunum.U) {
         initialized := true.B
-        state := V4_Ctrl_State.STATE_RECV_HEAD
+        state := MicrocodeControllerState.STATE_RECV_HEAD
       }
     }
   }
   val will_next = WireDefault(false.B)
 
-  when(state === V4_Ctrl_State.STATE_RECV_HEAD) {
+  when(state === MicrocodeControllerState.STATE_RECV_HEAD) {
     io.rx.ready := true.B
     when(io.rx.valid) {
       val rxop = io.rx.bits(4, 0)
@@ -257,37 +257,37 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
       opcode := rxop
       opoff := rxoff
       trans_pos := 1.U
-      state := V4_Ctrl_State.STATE_RECV_ARG
+      state := MicrocodeControllerState.STATE_RECV_ARG
 
-      when(rxop === V4_SER_OP.SEROP_HALT || rxop === V4_SER_OP.SEROP_ITR || rxop === V4_SER_OP.SEROP_FTLB || rxop === V4_SER_OP.SEROP_SYNCI || rxop === V4_SER_OP.SEROP_UCLK || rxop === V4_SER_OP.SEROP_HFCLR) {
+      when(rxop === MicrocodeSerialOp.SEROP_HALT || rxop === MicrocodeSerialOp.SEROP_ITR || rxop === MicrocodeSerialOp.SEROP_FTLB || rxop === MicrocodeSerialOp.SEROP_SYNCI || rxop === MicrocodeSerialOp.SEROP_UCLK || rxop === MicrocodeSerialOp.SEROP_HFCLR) {
         trans_bytes := 2.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_REGRD) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_REGRD) {
         trans_bytes := 4.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_INST) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_INST) {
         trans_bytes := 6.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_PGRD || rxop === V4_SER_OP.SEROP_PGWT || rxop === V4_SER_OP.SEROP_PGZERO) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_PGRD || rxop === MicrocodeSerialOp.SEROP_PGWT || rxop === MicrocodeSerialOp.SEROP_PGZERO) {
         trans_bytes := 7.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_REDIR || rxop === V4_SER_OP.SEROP_MEMRD || rxop === V4_SER_OP.SEROP_HFSET) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_REDIR || rxop === MicrocodeSerialOp.SEROP_MEMRD || rxop === MicrocodeSerialOp.SEROP_HFSET) {
         trans_bytes := 8.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_MMU || rxop === V4_SER_OP.SEROP_FTLB2) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_MMU || rxop === MicrocodeSerialOp.SEROP_FTLB2) {
         trans_bytes := 9.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_REGWT || rxop === V4_SER_OP.SEROP_PGCP) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_REGWT || rxop === MicrocodeSerialOp.SEROP_PGCP) {
         trans_bytes := 12.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_PGST) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_PGST) {
         trans_bytes := 15.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_MEMWT) {
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_MEMWT) {
         trans_bytes := 16.U
-      }.elsewhen(rxop === V4_SER_OP.SEROP_NEXT || rxop === V4_SER_OP.SEROP_CLK) {
-        state := V4_Ctrl_State.STATE_DO_OP
+      }.elsewhen(rxop === MicrocodeSerialOp.SEROP_NEXT || rxop === MicrocodeSerialOp.SEROP_CLK) {
+        state := MicrocodeControllerState.STATE_DO_OP
         trans_bytes := 1.U
       }.otherwise {
-        state := V4_Ctrl_State.STATE_ERROR
+        state := MicrocodeControllerState.STATE_ERROR
         errno := rxop
       }
     }
   }
   val page_mem_can_write = WireDefault(false.B)
-  when(state === V4_Ctrl_State.STATE_LOAD_DATA){
+  when(state === MicrocodeControllerState.STATE_LOAD_DATA){
     io.rx.ready := true.B
     for(index <- 0 until 8){
       page_word_content(index) := io.rx.bits
@@ -298,7 +298,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
       page_mem_can_write := true.B
       when(byte_cnt === 511.U){
         byte_cnt := 0.U
-        state := V4_Ctrl_State.STATE_DO_OP
+        state := MicrocodeControllerState.STATE_DO_OP
       }.otherwise{
         byte_cnt := byte_cnt + 1.U
       }
@@ -313,16 +313,16 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   }
 
 
-  when(state === V4_Ctrl_State.STATE_RECV_ARG) {
+  when(state === MicrocodeControllerState.STATE_RECV_ARG) {
     io.rx.ready := true.B
     when(io.rx.valid) {
       oparg(trans_pos) := io.rx.bits
       when(trans_pos +& 1.U === trans_bytes) {
         trans_pos := 0.U
         trans_bytes := 0.U
-        state := V4_Ctrl_State.STATE_DO_OP
-        when(opcode === V4_SER_OP.SEROP_PGWT){
-          state := V4_Ctrl_State.STATE_LOAD_DATA
+        state := MicrocodeControllerState.STATE_DO_OP
+        when(opcode === MicrocodeSerialOp.SEROP_PGWT){
+          state := MicrocodeControllerState.STATE_LOAD_DATA
           byte_cnt := 0.U
         }
       }.otherwise {
@@ -331,61 +331,61 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     }
   }
 
-  when(state === V4_Ctrl_State.STATE_DO_OP) {
+  when(state === MicrocodeControllerState.STATE_DO_OP) {
     trans_bytes := 1.U
     trans_pos := 1.U
-    state := V4_Ctrl_State.STATE_SEND_HEAD
+    state := MicrocodeControllerState.STATE_SEND_HEAD
     switch(opcode) {
-      is(V4_SER_OP.SEROP_NEXT) {
-        state := V4_Ctrl_State.STATE_WAIT_NEXT
+      is(MicrocodeSerialOp.SEROP_NEXT) {
+        state := MicrocodeControllerState.STATE_WAIT_NEXT
       }
-      is(V4_SER_OP.SEROP_HALT) {
+      is(MicrocodeSerialOp.SEROP_HALT) {
         io.cpu(opidx).ext_itr := true.B
-        cpu_state(opidx) := V4_CPU_State.CPU_HALT
+        cpu_state(opidx) := MicrocodeCpuState.CPU_HALT
       }
-      is(V4_SER_OP.SEROP_ITR) {
+      is(MicrocodeSerialOp.SEROP_ITR) {
         io.cpu(opidx).ext_itr := true.B
       }
-      is(V4_SER_OP.SEROP_MMU) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_MMU
+      is(MicrocodeSerialOp.SEROP_MMU) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_MMU
         ctrl_base_addr := 43.U
         ctrl_ptr := 43.U
         cnt_run := 0.U
       }
-      is(V4_SER_OP.SEROP_REDIR) {
-        when(cpu_state(opidx) === V4_CPU_State.CPU_HALT || cpu_state(opidx) === V4_CPU_State.CPU_ITR) {
-          state := V4_Ctrl_State.STATE_RUN
+      is(MicrocodeSerialOp.SEROP_REDIR) {
+        when(cpu_state(opidx) === MicrocodeCpuState.CPU_HALT || cpu_state(opidx) === MicrocodeCpuState.CPU_ITR) {
+          state := MicrocodeControllerState.STATE_RUN
           cnt_run := 0.U
-          state_register := V4_OP_OP.STATE_REDIR
+          state_register := MicrocodeRoutine.STATE_REDIR
           ctrl_base_addr := 75.U
           ctrl_ptr := 75.U
         }
       }
-      is(V4_SER_OP.SEROP_FTLB) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_FLUSH
+      is(MicrocodeSerialOp.SEROP_FTLB) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_FLUSH
         cnt_run := 0.U
         ctrl_base_addr := 50.U
         ctrl_ptr := 50.U
       }
-      is(V4_SER_OP.SEROP_FTLB2) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_FLUSH2
+      is(MicrocodeSerialOp.SEROP_FTLB2) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_FLUSH2
         ctrl_base_addr := 52.U
         ctrl_ptr := 52.U
         cnt_run := 0.U
       }
-      is(V4_SER_OP.SEROP_SYNCI) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_SYNCI
+      is(MicrocodeSerialOp.SEROP_SYNCI) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_SYNCI
         cnt_run := 0.U
         ctrl_base_addr := 61.U
         ctrl_ptr := 61.U
       }
-      is(V4_SER_OP.SEROP_REGRD) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_REGRD
+      is(MicrocodeSerialOp.SEROP_REGRD) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_REGRD
         cnt_run := 0.U
         when(oparg(2)(5)) {
           ctrl_base_addr := 64.U
@@ -395,9 +395,9 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
           ctrl_ptr := 63.U
         }
       }
-      is(V4_SER_OP.SEROP_REGWT) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_REGWT
+      is(MicrocodeSerialOp.SEROP_REGWT) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_REGWT
         cnt_run := 0.U
         when(oparg(2)(5)) {
           ctrl_base_addr := 70.U
@@ -407,66 +407,66 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
           ctrl_ptr := 69.U
         }
       }
-      is(V4_SER_OP.SEROP_MEMRD) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_MEMRD
+      is(MicrocodeSerialOp.SEROP_MEMRD) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_MEMRD
         cnt_run := 0.U
         ctrl_base_addr := 92.U
         ctrl_ptr := 92.U
       }
-      is(V4_SER_OP.SEROP_MEMWT) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_MEMWT
+      is(MicrocodeSerialOp.SEROP_MEMWT) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_MEMWT
         cnt_run := 0.U
         ctrl_base_addr := 101.U
         ctrl_ptr := 101.U
       }
-      is(V4_SER_OP.SEROP_CLK) {
+      is(MicrocodeSerialOp.SEROP_CLK) {
         for (i <- 0 to 7) {
           retarg(i) := global_clk(i * 8 + 7, i * 8)
         }
       }
-      is(V4_SER_OP.SEROP_UCLK) {
+      is(MicrocodeSerialOp.SEROP_UCLK) {
         for (i <- 0 to 7) {
           retarg(i) := user_clk(opidx)(i * 8 + 7, i * 8)
         }
       }
-      is(V4_SER_OP.SEROP_HFSET) {
+      is(MicrocodeSerialOp.SEROP_HFSET) {
         when(!hfutex_hit_set) {
           hfutex_masks(opidx)(hfutex_pos(opidx)) := hfutex_set_value
           hfutex_pos(opidx) := Mux(hfutex_pos(opidx) === 3.U, 0.U, hfutex_pos(opidx) + 1.U)
         }
       }
-      is(V4_SER_OP.SEROP_HFCLR) {
+      is(MicrocodeSerialOp.SEROP_HFCLR) {
         for (i <- 0 to 3) {
           hfutex_masks(opidx)(i) := 0.U
         }
       }
-      is(V4_SER_OP.SEROP_INST) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_INST
+      is(MicrocodeSerialOp.SEROP_INST) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_INST
         cnt_run := 0.U
         ctrl_base_addr := 48.U
         ctrl_ptr := 48.U
       }
-      is(V4_SER_OP.SEROP_PGRD) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_PGRD
+      is(MicrocodeSerialOp.SEROP_PGRD) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_PGRD
         cnt_run := 0.U
         ctrl_base_addr := 173.U
         ctrl_ptr := 173.U
         page_ptr_in_rw := 0.U
       }
-      is(V4_SER_OP.SEROP_PGST) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_PGST
+      is(MicrocodeSerialOp.SEROP_PGST) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_PGST
         cnt_run := 0.U
         ctrl_base_addr := 110.U
         ctrl_ptr := 110.U
       }
-      is(V4_SER_OP.SEROP_PGZERO) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_PGST
+      is(MicrocodeSerialOp.SEROP_PGZERO) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_PGST
         cnt_run := 0.U
         ctrl_base_addr := 110.U
         ctrl_ptr := 110.U
@@ -474,59 +474,59 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
           oparg(7 + index) := 0.U
         }
       }
-      is(V4_SER_OP.SEROP_PGWT) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_PGWT
+      is(MicrocodeSerialOp.SEROP_PGWT) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_PGWT
         cnt_run := 0.U
         ctrl_base_addr := 214.U
         ctrl_ptr := 214.U
         page_ptr_in_rw := 0.U
       }
-      is(V4_SER_OP.SEROP_PGCP) {
-        state := V4_Ctrl_State.STATE_RUN
-        state_register := V4_OP_OP.STATE_PGCP
+      is(MicrocodeSerialOp.SEROP_PGCP) {
+        state := MicrocodeControllerState.STATE_RUN
+        state_register := MicrocodeRoutine.STATE_PGCP
         cnt_run := 0.U
         ctrl_base_addr := 129.U
         ctrl_ptr := 129.U
       }
     }
   }
-  when(state === V4_Ctrl_State.STATE_SEND_HEAD) {
+  when(state === MicrocodeControllerState.STATE_SEND_HEAD) {
     io.tx.valid := true.B
     io.tx.bits := Cat(opoff, opcode)
     trans_pos := 0.U
     when(io.tx.ready) {
-      when(opcode === V4_SER_OP.SEROP_NEXT) {
+      when(opcode === MicrocodeSerialOp.SEROP_NEXT) {
         trans_bytes := 14.U
-        state := V4_Ctrl_State.STATE_SEND_ARG
-      }.elsewhen(opcode === V4_SER_OP.SEROP_REGRD || opcode === V4_SER_OP.SEROP_MEMRD || opcode === V4_SER_OP.SEROP_CLK || opcode ===  V4_SER_OP.SEROP_UCLK) {
+        state := MicrocodeControllerState.STATE_SEND_ARG
+      }.elsewhen(opcode === MicrocodeSerialOp.SEROP_REGRD || opcode === MicrocodeSerialOp.SEROP_MEMRD || opcode === MicrocodeSerialOp.SEROP_CLK || opcode ===  MicrocodeSerialOp.SEROP_UCLK) {
         trans_bytes := 8.U
-        state := V4_Ctrl_State.STATE_SEND_ARG
-      }.elsewhen(opcode === V4_SER_OP.SEROP_PGRD){
-        state := V4_Ctrl_State.STATE_DUMP_DATA
+        state := MicrocodeControllerState.STATE_SEND_ARG
+      }.elsewhen(opcode === MicrocodeSerialOp.SEROP_PGRD){
+        state := MicrocodeControllerState.STATE_DUMP_DATA
         byte_cnt := 0.U
         pageReadEnable := true.B
       }.otherwise {
         trans_bytes := 0.U
-        state := V4_Ctrl_State.STATE_RECV_HEAD
+        state := MicrocodeControllerState.STATE_RECV_HEAD
       }
     }
   }
 
-  when(state === V4_Ctrl_State.STATE_SEND_ARG) {
+  when(state === MicrocodeControllerState.STATE_SEND_ARG) {
     io.tx.valid := true.B
     io.tx.bits := retarg(trans_pos)
     when(io.tx.ready) {
       when(trans_pos +& 1.U === trans_bytes) {
         trans_pos := 0.U
         trans_bytes := 0.U
-        state := V4_Ctrl_State.STATE_RECV_HEAD
+        state := MicrocodeControllerState.STATE_RECV_HEAD
       }.otherwise {
         trans_pos := trans_pos + 1.U
       }
     }
   }
-  when(state === V4_Ctrl_State.STATE_DUMP_DATA) {
+  when(state === MicrocodeControllerState.STATE_DUMP_DATA) {
     io.tx.valid := true.B
     pageReadEnable := true.B
     // Re-read the current word during backpressure. Select the next word
@@ -536,7 +536,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     when(io.tx.fire){
       when(byte_cnt === 511.U){
         byte_cnt := 0.U
-        state := V4_Ctrl_State.STATE_RECV_HEAD
+        state := MicrocodeControllerState.STATE_RECV_HEAD
       }.otherwise{
         byte_cnt := byte_cnt + 1.U
       }
@@ -546,32 +546,32 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   val jump_tap = WireDefault(false.B)
   val jump_condition = WireDefault(false.B)
   val cnt_rerun = WireDefault(0.U(6.W))
-  val no_wait_tap = state === V4_Ctrl_State.STATE_RUN && ctrl_inst64_nowait && ctrl_inst64
+  val no_wait_tap = state === MicrocodeControllerState.STATE_RUN && ctrl_inst64_nowait && ctrl_inst64
   // The core leaves the monitor on MRET; it cannot report idle until its next trap.
-  val postMret = (state_register === V4_OP_OP.STATE_REDIR && cnt_run === 16.U) ||
-    (state_register === V4_OP_OP.STATE_HFUTEX && cnt_run === 17.U)
+  val postMret = (state_register === MicrocodeRoutine.STATE_REDIR && cnt_run === 16.U) ||
+    (state_register === MicrocodeRoutine.STATE_HFUTEX && cnt_run === 17.U)
     switch(state_register){
-      is(V4_OP_OP.STATE_PGST){
+      is(MicrocodeRoutine.STATE_PGST){
         cnt_rerun := 4.U
         jump_tap := cnt_run === 14.U
         jump_condition := pg_loop_cnt =/= 63.U
       }
-      is(V4_OP_OP.STATE_PGCP){
+      is(MicrocodeRoutine.STATE_PGCP){
         cnt_rerun := 12.U
         jump_tap := cnt_run === 31.U
         jump_condition := pg_loop_cnt =/= 63.U
       }
-      is(V4_OP_OP.STATE_PGRD){
+      is(MicrocodeRoutine.STATE_PGRD){
         cnt_rerun := 11.U
         jump_tap := cnt_run === 29.U
         jump_condition := page_ptr_in_rw =/= 64.U
       }
-      is(V4_OP_OP.STATE_PGWT){
+      is(MicrocodeRoutine.STATE_PGWT){
         cnt_rerun := 10.U
         jump_tap := cnt_run === 29.U
         jump_condition := page_ptr_in_rw =/= 64.U
       }
-      is(V4_OP_OP.STATE_HFUTEX){
+      is(MicrocodeRoutine.STATE_HFUTEX){
         jump_tap := cnt_run === 2.U
         val no_jump_should = regback(1)(6,0) === 1.U && hfutex_match_reg =/= 0.U && hfutex_hit
         jump_condition := !no_jump_should
@@ -580,51 +580,51 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     }
   when(no_wait_tap){
     when(cpu_inst64_ready){
-      cpu_state(opidx) := V4_CPU_State.CPU_USER
+      cpu_state(opidx) := MicrocodeCpuState.CPU_USER
     }
   }
     val cnt_can_jump = WireDefault(false.B)
     cnt_can_jump := jump_tap && jump_condition
     //state change according to state_run
-    when(state === V4_Ctrl_State.STATE_RUN){
+    when(state === MicrocodeControllerState.STATE_RUN){
       //every time will_next is high update cnt
       //every time oplast is high switch to next state
       when(will_next) {
         when(ctrl_last) {
-          when(state_register === V4_OP_OP.STATE_DO_INIT) {
-            state := V4_Ctrl_State.STATE_INIT_WAIT
+          when(state_register === MicrocodeRoutine.STATE_DO_INIT) {
+            state := MicrocodeControllerState.STATE_INIT_WAIT
             inited_num := inited_num + 1.U
-          }.elsewhen(state_register === V4_OP_OP.STATE_NEXT){
+          }.elsewhen(state_register === MicrocodeRoutine.STATE_NEXT){
             when(retarg(1) === RV_ITR_ECALL ){
               for(index <- 0 to 5){
                 retarg(index +8) := regback(0)(index * 8 + 7, index * 8)
               }
               when(regback(0) === ECALL_FUTEX){
-                state := V4_Ctrl_State.STATE_Jump_HFUTEX
+                state := MicrocodeControllerState.STATE_Jump_HFUTEX
               }.otherwise{
-                state := V4_Ctrl_State.STATE_SEND_HEAD
+                state := MicrocodeControllerState.STATE_SEND_HEAD
               }
             }.otherwise{
-              state := V4_Ctrl_State.STATE_SEND_HEAD
+              state := MicrocodeControllerState.STATE_SEND_HEAD
             }
-          }.elsewhen(state_register === V4_OP_OP.STATE_HFUTEX){
-            state := V4_Ctrl_State.STATE_WAIT_NEXT
+          }.elsewhen(state_register === MicrocodeRoutine.STATE_HFUTEX){
+            state := MicrocodeControllerState.STATE_WAIT_NEXT
           }.otherwise {
-            state := V4_Ctrl_State.STATE_SEND_HEAD
+            state := MicrocodeControllerState.STATE_SEND_HEAD
           }
         }
       }
     }
-  when(state === V4_Ctrl_State.STATE_Jump_HFUTEX){
-    state_register := V4_OP_OP.STATE_HFUTEX
-    state := V4_Ctrl_State.STATE_RUN
+  when(state === MicrocodeControllerState.STATE_Jump_HFUTEX){
+    state_register := MicrocodeRoutine.STATE_HFUTEX
+    state := MicrocodeControllerState.STATE_RUN
     cnt_run := 0.U
     ctrl_base_addr := 23.U
     ctrl_ptr := 23.U
   }
 
   //output logic
-  when(state === V4_Ctrl_State.STATE_RUN){
+  when(state === MicrocodeControllerState.STATE_RUN){
     when(ctrl_regacc_wt || ctrl_regacc_rd){
       will_next := !cpu_regacc_busy
     }.elsewhen(ctrl_inst64){
@@ -635,7 +635,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
       will_next := true.B
     })
   }
-  when(state === V4_Ctrl_State.STATE_RUN){
+  when(state === MicrocodeControllerState.STATE_RUN){
     ctrl_ptr := ctrl_base_addr + cnt_run + will_next
     when(will_next){
       cnt_run := cnt_run + 1.U
@@ -643,20 +643,20 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
         when(jump_condition){
           ctrl_ptr := ctrl_base_addr + cnt_rerun
           cnt_run := cnt_rerun
-          when(state_register === V4_OP_OP.STATE_PGST || state_register === V4_OP_OP.STATE_PGCP ){
+          when(state_register === MicrocodeRoutine.STATE_PGST || state_register === MicrocodeRoutine.STATE_PGCP ){
             pg_loop_cnt := pg_loop_cnt + 1.U
           }
-          when(state_register === V4_OP_OP.STATE_HFUTEX){
+          when(state_register === MicrocodeRoutine.STATE_HFUTEX){
             //jump out
-            state := V4_Ctrl_State.STATE_SEND_HEAD
+            state := MicrocodeControllerState.STATE_SEND_HEAD
           }
         }.elsewhen(!jump_condition){
           //go to next
           ctrl_ptr := ctrl_base_addr + cnt_run + 1.U
           cnt_run := cnt_run + 1.U
-          when(state_register === V4_OP_OP.STATE_PGST || state_register === V4_OP_OP.STATE_PGCP ){
+          when(state_register === MicrocodeRoutine.STATE_PGST || state_register === MicrocodeRoutine.STATE_PGCP ){
             pg_loop_cnt := 0.U
-          }.elsewhen((state_register === V4_OP_OP.STATE_PGRD) || (state_register === V4_OP_OP.STATE_PGWT)) {
+          }.elsewhen((state_register === MicrocodeRoutine.STATE_PGRD) || (state_register === MicrocodeRoutine.STATE_PGWT)) {
             page_ptr_in_rw := 0.U
           }
         }
@@ -665,7 +665,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   }
 
 
-  when(state === V4_Ctrl_State.STATE_RUN) {
+  when(state === MicrocodeControllerState.STATE_RUN) {
     io.cpu(opidx).ext_itr := ctrl_itr
     io.cpu(opidx).regacc_rd := ctrl_regacc_rd
     io.cpu(opidx).regacc_wt := ctrl_regacc_wt
@@ -676,11 +676,11 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     io.cpu(opidx).inst64_raw := ctrl_inst_raw
   }
   //WAIT_INIT and WAIT_NEXT don't need load stage
-  when(state === V4_Ctrl_State.STATE_INIT_WAIT){
+  when(state === MicrocodeControllerState.STATE_INIT_WAIT){
     ctrl_base_addr := 0.U
     ctrl_ptr := 0.U
   }
-  when(state === V4_Ctrl_State.STATE_WAIT_NEXT){
+  when(state === MicrocodeControllerState.STATE_WAIT_NEXT){
     ctrl_base_addr := 8.U
     ctrl_ptr := 8.U
   }
@@ -706,7 +706,7 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
 
 
 
-  when(state === V4_Ctrl_State.STATE_RUN && ctrl_regacc_rd && !cpu_regacc_busy) {
+  when(state === MicrocodeControllerState.STATE_RUN && ctrl_regacc_rd && !cpu_regacc_busy) {
     switch(ctrl_header){
       is("b0000".U){
         regback(ctrl_loc_idx) := cpu_regacc_rdata
@@ -780,23 +780,23 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
     }
   }
   regacc_idx_wire := ctrl_idx
-  when((state_register === V4_OP_OP.STATE_REGRD || state_register=== V4_OP_OP.STATE_REGWT  )&& !oparg(2)(5)){
+  when((state_register === MicrocodeRoutine.STATE_REGRD || state_register=== MicrocodeRoutine.STATE_REGWT  )&& !oparg(2)(5)){
     regacc_idx_wire := oparg(2)(4,0)
   }.otherwise{
     regacc_idx_wire := ctrl_idx
   }
   ctrl_inst_raw := ctrl_misc
-  when(state_register === V4_OP_OP.STATE_REGWT){
+  when(state_register === MicrocodeRoutine.STATE_REGWT){
     ctrl_inst_raw := (ctrl_misc | (oparg(2)(4,0) << 7 ).asUInt)
-  }.elsewhen(state_register === V4_OP_OP.STATE_REGRD){
+  }.elsewhen(state_register === MicrocodeRoutine.STATE_REGRD){
     ctrl_inst_raw := (ctrl_misc | (oparg(2)(4,0) << 15 ).asUInt)
-  }.elsewhen(state_register === V4_OP_OP.STATE_INST){
+  }.elsewhen(state_register === MicrocodeRoutine.STATE_INST){
     ctrl_inst_raw := Cat(oparg(5), oparg(4), oparg(3), oparg(2))
   }.otherwise{
     ctrl_inst_raw := ctrl_misc
   }
   // Commit a captured word only when BOOM completes the register read.
-  capturePageWord := state === V4_Ctrl_State.STATE_RUN && ctrl_regacc_rd &&
+  capturePageWord := state === MicrocodeControllerState.STATE_RUN && ctrl_regacc_rd &&
     ctrl_header === "b0111".U && will_next
   when(capturePageWord) {
     page_ptr_in_rw := page_ptr_in_rw + 1.U
@@ -805,11 +805,11 @@ class NulCPUCtrlMPMicrocode(cpunum: Int) extends Module {
   // Prefetch word zero as the command enters the ROM. On each completed
   // register write, issue the next SRAM address in the same clock cycle.
   // With a stalled BOOM, the index and the exposed word remain unchanged.
-  val writingPage = state === V4_Ctrl_State.STATE_RUN &&
-    state_register === V4_OP_OP.STATE_PGWT
+  val writingPage = state === MicrocodeControllerState.STATE_RUN &&
+    state_register === MicrocodeRoutine.STATE_PGWT
   val consumePageWord = writingPage && ctrl_regacc_wt &&
     ctrl_header === "b1010".U && !cpu_regacc_busy
-  when(state === V4_Ctrl_State.STATE_DO_OP && opcode === V4_SER_OP.SEROP_PGWT) {
+  when(state === MicrocodeControllerState.STATE_DO_OP && opcode === MicrocodeSerialOp.SEROP_PGWT) {
     pageReadEnable := true.B
   }
   when(writingPage) {
